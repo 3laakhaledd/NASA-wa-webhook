@@ -31,6 +31,9 @@ app.use("/line/1", (req, res) => res.redirect(307, req.originalUrl.replace(/^\/l
 const lines = linesLib.create({ ...evoOpts, lines: LINES, connectKey: process.env.CONNECT_KEY || "" });
 lines.install(app);
 require("./report").install(app, name => apis.get(name), LINES, instance => fetchGroups(instance));
+// One ClickUp task with members/admins/parents per group for every line (counts only).
+require("./groups-report").install(app, LINES, instance => fetchGroups(instance),
+  { axios, clickupApi: CLICKUP_API, token: CLICKUP_TOKEN, listId: process.env.MEMBERS_LIST_ID || LIST_ID });
 // Read-only check of the ClickUp destination (which workspace + list the token writes to). Never returns the token.
 app.get("/clickup-check", async (req, res) => {
   res.set("Cache-Control", "no-store");
@@ -68,6 +71,7 @@ app.get("/", (req, res) => res.json({
     chats: "GET /chats?preview=true&offset=0&limit=50",
     search: "GET /search?phone=CONTACT_NUMBER&offset=0&limit=200",
     groups: "GET /groups?name=Grade&line=N (member counts only)",
+    groupsReport: "GET /groups/report (one ClickUp task: members/admins/parents per group, every line)",
     groupMembers: "GET /groups/members?name=Grade 5&line=N (counts here; numbers go to the private ClickUp WhatsApp list)",
     health: "GET /retrieval-health",
     run: "GET /run (legacy ClickUp task creation for all connected lines; NOT a read-only report)"
