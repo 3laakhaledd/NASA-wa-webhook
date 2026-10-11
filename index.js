@@ -31,6 +31,21 @@ app.use("/line/1", (req, res) => res.redirect(307, req.originalUrl.replace(/^\/l
 const lines = linesLib.create({ ...evoOpts, lines: LINES, connectKey: process.env.CONNECT_KEY || "" });
 lines.install(app);
 require("./report").install(app, name => apis.get(name), LINES, instance => fetchGroups(instance));
+// Read-only check of the ClickUp destination (which workspace + list the token writes to). Never returns the token.
+app.get("/clickup-check", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const h = { headers: { Authorization: CLICKUP_TOKEN }, timeout: 20000 };
+  const out = { tokenSet: !!CLICKUP_TOKEN, tasksListId: LIST_ID, membersListId: process.env.MEMBERS_LIST_ID || LIST_ID };
+  try { const t = await axios.get(CLICKUP_API + "/team", h); out.workspaces = (t.data.teams || []).map(x => x.name); }
+  catch (e) { out.tokenError = "ClickUp rejected the token" + (e.response?.status ? " (HTTP " + e.response.status + ")" : ""); }
+  for (const [k, id] of [["tasksList", out.tasksListId], ["membersList", out.membersListId]]) {
+    try { const l = await axios.get(CLICKUP_API + "/list/" + id, h);
+      out[k] = { ok: true, name: l.data.name, folder: l.data.folder?.name, space: l.data.space?.name }; }
+    catch (e) { out[k] = { ok: false, error: "List not reachable" + (e.response?.status ? " (HTTP " + e.response.status + ")" : "") }; }
+  }
+  out.ready = out.tokenSet && !out.tokenError && out.tasksList.ok && out.membersList.ok;
+  res.json(out);
+});
 // ?line=2 or ?instance=spen-whatsapp-2 selects a number; default is line 1.
 function pickInstance(req) {
   const n = Number(req.query.line);
@@ -44,6 +59,7 @@ app.get("/", (req, res) => res.json({
   status: "ok", service: "spen-wa-insights", version: retrieval.VERSION,
   lines: LINES.map((name, i) => ({ line: i + 1, instance: name })),
   endpoints: {
+    clickupCheck: "GET /clickup-check (which ClickUp workspace/list the service writes to)",
     weekReport: "GET /report/week?from=YYYY-MM-DD&to=YYYY-MM-DD&days=0,1,2,3,4&line=N (individual customer chats, compact)",
     connect: "GET /connect (QR / pairing codes for every line)",
     lines: "GET /lines (connection status of every line)",
