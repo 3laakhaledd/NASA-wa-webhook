@@ -137,6 +137,7 @@ function install(app, apiFor, lines, fetchGroups) {
       repliedAnotherDay: list.filter(x => x.status === "replied another day").length,
       pending: list.filter(x => x.status.startsWith("pending")).length, items: list };
   }
+  return { handler };
 }
 
 // Working hours (Riyadh): Sun-Thu, OPEN-CLOSE. Business seconds between two instants.
