@@ -6,6 +6,9 @@
 //   RUN: week-list YYYY-MM-DD YYYY-MM-DD [line N]
 //   RUN: week-score YYYY-MM-DD YYYY-MM-DD [line N]     (task description holds cls=..., cat=..., cmp=...)
 //   RUN: week-numbers YYYY-MM-DD YYYY-MM-DD [line N]   (task description holds cls=..., cat=...)
+//   RUN: send-image <clickupTaskId> to <exact group name> from +9665XXXXXXXX
+//        Sends the task's single image attachment with its "WA Captions" custom field as the caption.
+//        Refuses unless the sender number is a connected line and exactly one group has that name.
 const retrieval = require("./retrieval");
 function install({ axios, api, token, listId, report, fetchGroups, lines, cron }) {
   const H = () => ({ headers: { Authorization: token }, timeout: 30000 });
@@ -25,7 +28,59 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
   const memberNumber = p => { const v = [p.phoneNumber, p.jid, p.id].find(x => typeof x === "string" && x.endsWith("@s.whatsapp.net"));
     return v ? "+" + v.split("@")[0].split(":")[0] : null; };
 
+  // ---- send-image -------------------------------------------------------------
+  const evoBase = () => String(process.env.EVO_API_URL || "https://evolution-api-production-3bf028.up.railway.app").replace(/\/$/, "");
+  const evoH = () => ({ headers: { apikey: process.env.EVO_API_KEY || "spen-evo-2026-secret", "Content-Type": "application/json" },
+    timeout: 120000, maxBodyLength: Infinity, maxContentLength: Infinity });
+  const digits = s => String(s || "").split("@")[0].split(":")[0].replace(/\D/g, "");
+  const norm = s => String(s || "").toLowerCase().replace(/\s+/g, "");
+
+  async function sendImage(cmd) {
+    const m = cmd.match(/^send-image\s+(\S+)\s+to\s+(.+?)\s+from\s+\+?([\d\s]+)$/i);
+    if (!m) throw new Error("Use: RUN: send-image <taskId> to <exact group name> from +9665XXXXXXXX");
+    const taskId = m[1], groupName = m[2].trim(), phone = m[3].replace(/\D/g, "");
+
+    // 1. Source task: exactly one image + the WA Captions field.
+    const t = (await axios.get(api + "/task/" + encodeURIComponent(taskId), H())).data;
+    const cf = (t.custom_fields || []).find(f => norm(f.name) === "wacaptions");
+    const caption = cf && typeof cf.value === "string" ? cf.value.trim() : "";
+    if (!caption) throw new Error("Task " + taskId + " has no WA Captions value");
+    const imgs = (t.attachments || []).filter(a => /^image\//i.test(a.mimetype || "") || /\.(png|jpe?g|webp)(\?|$)/i.test(a.url || a.title || ""));
+    if (imgs.length !== 1) throw new Error("Expected exactly 1 image attachment on task " + taskId + ", found " + imgs.length);
+    const img = imgs[0];
+    let bin;
+    try { bin = await axios.get(img.url, { responseType: "arraybuffer", timeout: 60000 }); }
+    catch (e) { bin = await axios.get(img.url, { responseType: "arraybuffer", timeout: 60000, headers: { Authorization: token } }); }
+    const mimetype = String(bin.headers["content-type"] || img.mimetype || "image/png").split(";")[0];
+
+    // 2. The configured line whose own WhatsApp number is the requested sender.
+    const r = await axios.get(evoBase() + "/instance/fetchInstances", evoH());
+    const arr = (Array.isArray(r.data) ? r.data : [r.data]).filter(Boolean);
+    const inst = arr.map(x => ({ name: x.name || x.instance?.instanceName || x.instanceName,
+        owner: x.ownerJid || x.instance?.ownerJid, state: x.connectionStatus || x.instance?.status || x.instance?.state }))
+      .find(x => x.name && lines.includes(x.name) && digits(x.owner) === phone);
+    if (!inst) throw new Error("No configured line is linked to +" + phone + ". Link it on /connect first. Not sending.");
+    if (inst.state !== "open") throw new Error("Line " + inst.name + " (+" + phone + ") is not connected (" + inst.state + "). Not sending.");
+
+    // 3. Exactly one group with that exact name (case/space-insensitive).
+    const all = await fetchGroups(inst.name);
+    const gs = all.filter(g => norm(g.subject) === norm(groupName));
+    if (gs.length !== 1) {
+      const near = all.filter(g => norm(g.subject).includes(norm(groupName))).map(g => g.subject).slice(0, 10);
+      throw new Error((gs.length ? gs.length + " groups are named \"" + groupName + "\"" : "No group named \"" + groupName + "\" on +" + phone) +
+        ". Not sending." + (near.length ? " Similar: " + near.join(", ") : ""));
+    }
+
+    // 4. Send image + caption.
+    const s = await axios.post(evoBase() + "/message/sendMedia/" + encodeURIComponent(inst.name), {
+      number: gs[0].id, mediatype: "image", mimetype, caption, fileName: img.title || "image.png",
+      media: Buffer.from(bin.data).toString("base64") }, evoH());
+    return { done: true, text: "Sent image + WA Captions from task " + taskId + " to \"" + gs[0].subject + "\" from +" + phone +
+      " (line " + (lines.indexOf(inst.name) + 1) + "). WhatsApp message id: " + (s.data?.key?.id || "n/a") };
+  }
+
   async function run(cmd, desc) {
+    if (/^send-image\b/i.test(cmd)) return sendImage(cmd);
     const verb = (cmd.split(/\s+/)[0] || "").toLowerCase();
     const n = lineOf(cmd), instance = lines[n - 1];
     if (!instance) throw new Error("Unknown line " + n);
@@ -73,7 +128,7 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
       return { done: true, text: (verb === "week-score" ? "Scored metrics " : "Unreplied / late-replied numbers ") + from + " to " + to +
         " (line " + n + ")\n\n```\n" + JSON.stringify(r, null, 1) + "\n```" };
     }
-    throw new Error("Unknown command. Use: groups, members, week-list, week-score, week-numbers");
+    throw new Error("Unknown command. Use: groups, members, week-list, week-score, week-numbers, send-image");
   }
 
   async function tick() {
@@ -81,15 +136,16 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
     try {
       const r = await axios.get(api + "/list/" + listId + "/task", { ...H(), params: { order_by: "created", reverse: true, page: 0, subtasks: true } });
       for (const t of (r.data.tasks || []).filter(t => /^\s*RUN\s*[:\-]/i.test(t.name)).slice(0, 3)) {
-        const cmd = t.name.replace(/^\s*RUN\s*[:\-]\s*/i, "").trim();
+        const cmd = t.name.replace(/^\s*RUN\s*[:\-]\s*/i, "").replace(/\s*\(working\)$/, "").trim();
         try {
           const out = await run(cmd, t.description || t.text_content);
           if (!out.done) { if (!t.name.includes("(working)")) await rename(t.id, t.name + " (working)"); continue; }
-          await comment(t.id, out.text);
-          await rename(t.id, "DONE: " + cmd.replace(/\s*\(working\)$/, ""));
+          // Rename first so a one-shot command (send-image) can never run twice if the comment post fails.
+          await rename(t.id, "DONE: " + cmd).catch(() => {});
+          await comment(t.id, out.text).catch(() => {});
         } catch (e) {
+          await rename(t.id, "FAILED: " + cmd).catch(() => {});
           await comment(t.id, "Failed: " + e.message).catch(() => {});
-          await rename(t.id, "FAILED: " + cmd.replace(/\s*\(working\)$/, "")).catch(() => {});
         }
       }
     } catch (e) { /* ClickUp unreachable; retry next tick */ }
