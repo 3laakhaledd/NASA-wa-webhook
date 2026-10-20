@@ -34,6 +34,11 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
     timeout: 120000, maxBodyLength: Infinity, maxContentLength: Infinity });
   const digits = s => String(s || "").split("@")[0].split(":")[0].replace(/\D/g, "");
   const norm = s => String(s || "").toLowerCase().replace(/\s+/g, "");
+  // Rich-text fields can carry <p><br/></p> spacers and tags; WhatsApp would show them literally.
+  const cleanCaption = s => String(s || "")
+    .replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>/gi, "\n").replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 
   async function sendImage(cmd) {
     const m = cmd.match(/^send-image\s+(\S+)\s+to\s+(.+?)\s+from\s+\+?([\d\s]+)$/i);
@@ -43,7 +48,7 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
     // 1. Source task: exactly one image + the WA Captions field.
     const t = (await axios.get(api + "/task/" + encodeURIComponent(taskId), H())).data;
     const cf = (t.custom_fields || []).find(f => norm(f.name) === "wacaptions");
-    const caption = cf && typeof cf.value === "string" ? cf.value.trim() : "";
+    const caption = cf && typeof cf.value === "string" ? cleanCaption(cf.value) : "";
     if (!caption) throw new Error("Task " + taskId + " has no WA Captions value");
     const imgs = (t.attachments || []).filter(a => /^image\//i.test(a.mimetype || "") || /\.(png|jpe?g|webp)(\?|$)/i.test(a.url || a.title || ""));
     if (imgs.length !== 1) throw new Error("Expected exactly 1 image attachment on task " + taskId + ", found " + imgs.length);
