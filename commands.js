@@ -134,8 +134,17 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
   async function tick() {
     if (busy || !token) return; busy = true;
     try {
-      const r = await axios.get(api + "/list/" + listId + "/task", { ...H(), params: { order_by: "created", reverse: true, page: 0, subtasks: true } });
-      for (const t of (r.data.tasks || []).filter(t => /^\s*RUN\s*[:\-]/i.test(t.name)).slice(0, 3)) {
+      // Scan every page of tasks created in the last 3 days. Page 0 alone misses new RUN tasks
+      // once the daily import fills the list with chat tasks.
+      const since = Date.now() - 3 * 86400000, found = [];
+      for (let page = 0; page < 20; page++) {
+        const r = await axios.get(api + "/list/" + listId + "/task", { ...H(), params: { order_by: "created", page, subtasks: true, date_created_gt: since } });
+        const tasks = Array.isArray(r.data.tasks) ? r.data.tasks : [];
+        found.push(...tasks.filter(t => /^\s*RUN\s*[:\-]/i.test(t.name)));
+        if (r.data.last_page === true || tasks.length === 0) break;
+      }
+      if (found.length) console.log("commands: found " + found.length + " RUN task(s): " + found.map(t => t.name).join(" | "));
+      for (const t of found.slice(0, 3)) {
         const cmd = t.name.replace(/^\s*RUN\s*[:\-]\s*/i, "").replace(/\s*\(working\)$/, "").trim();
         try {
           const out = await run(cmd, t.description || t.text_content);
@@ -143,12 +152,14 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
           // Rename first so a one-shot command (send-image) can never run twice if the comment post fails.
           await rename(t.id, "DONE: " + cmd).catch(() => {});
           await comment(t.id, out.text).catch(() => {});
+          console.log("commands: DONE " + cmd);
         } catch (e) {
+          console.log("commands: FAILED " + cmd + " - " + e.message);
           await rename(t.id, "FAILED: " + cmd).catch(() => {});
           await comment(t.id, "Failed: " + e.message).catch(() => {});
         }
       }
-    } catch (e) { /* ClickUp unreachable; retry next tick */ }
+    } catch (e) { console.log("commands: tick error - " + (e.response?.status ? "HTTP " + e.response.status : e.message)); }
     finally { busy = false; }
   }
   cron.schedule("*/2 * * * *", tick, { timezone: "Asia/Riyadh" });
