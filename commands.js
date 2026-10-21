@@ -1,6 +1,8 @@
 // ClickUp-driven commands: anyone (incl. ClickUp Brain) creates a task in the WA Reports list named "RUN: <command>".
 // The service picks it up within ~2 minutes, posts the result as comments, and renames the task DONE:/FAILED:.
 // Commands:
+//   RUN: unread line 1 ending 6444
+//        Private unread snapshot with verified phone mappings and before/after unread counters.
 //   RUN: groups [name filter] [line N]
 //   RUN: members <group name> [line N]
 //   RUN: week-list YYYY-MM-DD YYYY-MM-DD [line N]
@@ -10,6 +12,7 @@
 //        Sends the task's single image attachment with its "WA Captions" custom field as the caption.
 //        Refuses unless the sender number is a connected line and exactly one group has that name.
 const retrieval = require("./retrieval");
+const { unreadReport } = require("./unread");
 function install({ axios, api, token, listId, report, fetchGroups, lines, cron }) {
   const H = () => ({ headers: { Authorization: token }, timeout: 30000 });
   let busy = false;
@@ -85,6 +88,28 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
   }
 
   async function run(cmd, desc) {
+    if (/^unread\b/i.test(cmd)) {
+      const m = cmd.match(/^unread(?:\s+line\s+(\d+))?(?:\s+ending\s+(\d{4,15}))?$/i);
+      if (!m) throw new Error("Use: RUN: unread line 1 ending 6444");
+      const n = Number(m[1] || 1), instance = lines[n - 1];
+      if (!instance) throw new Error("Unknown line " + n);
+      let data;
+      try {
+        data = await unreadReport({ axios, baseUrl: evoBase(), apiKey: evoH().headers.apikey,
+          instance, line: n, expectedSuffix: m[2], fetchGroups });
+      } catch (e) {
+        // Do not copy upstream response bodies, URLs, or credentials to ClickUp.
+        const safe = new Set(["Connected line phone number could not be verified",
+          "Selected WhatsApp line is not connected", "Selected line does not match the requested phone suffix",
+          "Chat list is unavailable; not an empty unread report",
+          "Chat list has missing, duplicate, or invalid unread counters",
+          "Connected number changed during snapshot"]);
+        throw new Error(safe.has(e.message) ? e.message : "Unread snapshot lookup failed; no complete snapshot was produced");
+      }
+      return { done: true, text: "Unread contact-number snapshot (line " + n + ")\n" +
+        "Private report data for the PDF. WhatsApp was not marked read by this command.\n\n" +
+        "```json\n" + JSON.stringify(data, null, 2) + "\n```" };
+    }
     if (/^send-image\b/i.test(cmd)) return sendImage(cmd);
     const verb = (cmd.split(/\s+/)[0] || "").toLowerCase();
     const n = lineOf(cmd), instance = lines[n - 1];
@@ -133,7 +158,7 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
       return { done: true, text: (verb === "week-score" ? "Scored metrics " : "Unreplied / late-replied numbers ") + from + " to " + to +
         " (line " + n + ")\n\n```\n" + JSON.stringify(r, null, 1) + "\n```" };
     }
-    throw new Error("Unknown command. Use: groups, members, week-list, week-score, week-numbers, send-image");
+    throw new Error("Unknown command. Use: unread, groups, members, week-list, week-score, week-numbers, send-image");
   }
 
   async function tick() {
@@ -159,7 +184,7 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
           await comment(t.id, out.text).catch(() => {});
           console.log("commands: DONE " + cmd);
         } catch (e) {
-          console.log("commands: FAILED " + cmd + " - " + e.message);
+          console.log("commands: FAILED: " + cmd + " - " + e.message);
           await rename(t.id, "FAILED: " + cmd).catch(() => {});
           await comment(t.id, "Failed: " + e.message).catch(() => {});
         }
