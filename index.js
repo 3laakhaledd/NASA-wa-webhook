@@ -30,6 +30,8 @@ LINES.forEach((name, i) => {
 app.use("/line/1", (req, res) => res.redirect(307, req.originalUrl.replace(/^\/line\/1/, "") || "/"));
 const lines = linesLib.create({ ...evoOpts, lines: LINES, connectKey: process.env.CONNECT_KEY || "" });
 lines.install(app);
+// Live unread counters per line: GET /unread?line=N (names + counts only, read-only).
+const unreadRoute = require("./unread-route").install(app, { ...evoOpts, lines: LINES });
 const report = require("./report").install(app, name => apis.get(name), LINES, instance => fetchGroups(instance));
 // Task-driven commands from the WA Reports list ("RUN: groups", "RUN: week-list ...", etc.)
 const commands = require("./commands").install({ axios, api: CLICKUP_API, token: CLICKUP_TOKEN, listId: LIST_ID, report, fetchGroups: instance => fetchGroups(instance), lines: LINES, cron });
@@ -59,11 +61,12 @@ function pickInstance(req) {
 }
 
 app.get("/", (req, res) => res.json({
-  status: "ok", service: "spen-wa-insights", version: retrieval.VERSION,
+  status: "ok", service: "spen-wa-insights", version: retrieval.VERSION, build: unreadRoute.BUILD,
   lines: LINES.map((name, i) => ({ line: i + 1, instance: name })),
   endpoints: {
     clickupCheck: "GET /clickup-check (which ClickUp workspace/list the service writes to)",
     weekReport: "GET /report/week?from=YYYY-MM-DD&to=YYYY-MM-DD&days=0,1,2,3,4&line=N (individual customer chats, compact)",
+    unread: "GET /unread?line=N (live unread counters, names only, read-only)",
     connect: "GET /connect (QR / pairing codes for every line)",
     lines: "GET /lines (connection status of every line)",
     insights: "GET /insights?date=YYYY-MM-DD&offset=0&limit=50&audit=true (line 1; /line/N/insights for others)",
