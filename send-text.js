@@ -19,8 +19,9 @@ async function sendGroups(ctx) {
     try { messages = parsePayload(source.description || source.text_content).messages; }
     catch (_) { throw new Error('Source message JSON unavailable; nothing sent'); }
   }
-  if (!Array.isArray(messages) || messages.length !== 2 || messages.some(t => typeof t !== 'string' || !t.trim() || t.length > 20000))
-    throw new Error('Exactly two nonempty text messages required');
+  if (!Array.isArray(messages) || messages.length < 1 || messages.length > 2 || messages.some(t => typeof t !== 'string' || !t.trim() || t.length > 20000))
+    throw new Error('One or two nonempty text messages required');
+  const n = messages.length;
   const digits = s => String(s || '').split('@')[0].split(':')[0].replace(/\D/g, '');
   let data;
   try { data = (await axios.get(evoBase() + '/instance/fetchInstances', evoH())).data; }
@@ -47,11 +48,11 @@ async function sendGroups(ctx) {
   const current = (await axios.get(api + '/task/' + encodeURIComponent(taskId), H())).data;
   if (!/^\s*RUN\s*:/i.test(current.name || '')) throw new Error('Batch already claimed; not retrying');
   await rename(taskId, 'SENDING: ' + cmd);
-  await comment(taskId, 'Approved batch claimed: ' + targets.length + ' exact groups, ' + (targets.length * 2) +
-    ' messages from +' + p.sender + '. Order per group: link then announcement. No automatic retries.\n' + targets.map(t => t.name).join('\n'));
+  await comment(taskId, 'Approved batch claimed: ' + targets.length + ' exact groups, ' + (targets.length * n) +
+    ' messages from +' + p.sender + '. No automatic retries.\n' + targets.map(t => t.name).join('\n'));
   const receipts = [];
   for (const target of targets) {
-    for (let i = 0; i < messages.length; i++) {
+    for (let i = 0; i < n; i++) {
       let sent;
       try { sent = await axios.post(evoBase() + '/message/sendText/' + encodeURIComponent(inst.name),
         { number: target.id, text: messages[i], linkPreview: i === 0 }, evoH()); }
@@ -60,14 +61,14 @@ async function sendGroups(ctx) {
       const id = sent.data?.key?.id;
       if (!id) throw new Error('Receipt absent for ' + target.name + ' message ' + (i + 1) + '. Do not retry batch.');
       receipts.push({ group: target.name, message: i + 1, id });
-      try { await comment(taskId, target.name + ' | message ' + (i + 1) + '/2 accepted | id: ' + id + ' | ' + new Date().toISOString()); }
+      try { await comment(taskId, target.name + ' | message ' + (i + 1) + '/' + n + ' accepted | id: ' + id + ' | ' + new Date().toISOString()); }
       catch (_) { throw new Error('Message accepted but receipt storage failed for ' + target.name + '. Do not retry batch.'); }
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
   }
-  return { done: true, text: 'Completed: ' + receipts.length + '/' + (targets.length * 2) + ' messages accepted across ' + targets.length +
+  return { done: true, text: 'Completed: ' + receipts.length + '/' + (targets.length * n) + ' messages accepted across ' + targets.length +
     ' groups from +' + p.sender + ' (line ' + (lines.indexOf(inst.name) + 1) + '). Delivery/read status not asserted.\n' +
-    targets.map(t => t.name + ': 2/2 accepted').join('\n') };
+    targets.map(t => t.name + ': ' + n + '/' + n + ' accepted').join('\n') };
 }
 async function sendText(ctx) {
   const { cmd, desc, taskId, axios, api, H, lines, evoBase, evoH, rename, comment } = ctx;
