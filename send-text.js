@@ -1,14 +1,17 @@
 'use strict';
 const parsePayload = desc => JSON.parse(String(desc || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
+const entryName = e => typeof e === 'string' ? e : (e && typeof e.name === 'string' ? e.name : '');
+const entryId = e => (e && typeof e === 'object' && typeof e.id === 'string') ? e.id : null;
 async function sendGroups(ctx) {
   const { cmd, desc, taskId, axios, api, H, lines, evoBase, evoH, rename, comment } = ctx;
   const m = cmd.match(/^send-text\s+groups\s+from\s+\+?(\d{10,15})$/i);
   if (!m || !taskId) throw new Error('Use: RUN: send-text groups from +SENDER');
   let p;
   try { p = parsePayload(desc); } catch (_) { throw new Error('Group-send payload must be JSON'); }
+  const keys = Array.isArray(p.groups) ? p.groups.map(e => entryName(e) + '|' + (entryId(e) || '')) : [];
   if (p.approved !== true || p.sender !== m[1] || !Array.isArray(p.groups) || !p.groups.length || p.groups.length > 15 ||
-      p.groups.some(g => typeof g !== 'string' || !g.trim()) || new Set(p.groups).size !== p.groups.length)
-    throw new Error('Explicit approval, matching sender and 1-15 unique exact group names required');
+      p.groups.some(e => !entryName(e).trim() || (entryId(e) !== null && !/^\d+@g\.us$/.test(entryId(e)))) || new Set(keys).size !== keys.length)
+    throw new Error('Explicit approval, matching sender and 1-15 unique exact group entries required');
   let messages = p.messages;
   if (p.sourceTaskId) {
     if (!/^[a-zA-Z0-9]+$/.test(p.sourceTaskId)) throw new Error('Invalid source task');
@@ -34,9 +37,10 @@ async function sendGroups(ctx) {
     { ...evoH(), params: { getParticipants: 'true' } })).data; }
   catch (_) { throw new Error('Group validation unavailable; nothing sent'); }
   if (!Array.isArray(all)) throw new Error('Group validation incomplete; nothing sent');
-  const targets = p.groups.map(name => {
-    const matches = all.filter(g => g.subject === name && typeof g.id === 'string' && g.id.endsWith('@g.us'));
-    if (matches.length !== 1) throw new Error('Group not uniquely matched: ' + name + '. Nothing sent');
+  const targets = p.groups.map(e => {
+    const name = entryName(e), want = entryId(e);
+    const matches = all.filter(g => g.subject === name && typeof g.id === 'string' && g.id.endsWith('@g.us') && (!want || g.id === want));
+    if (matches.length !== 1) throw new Error('Group not uniquely matched: ' + name + (want ? ' [pinned id]' : '') + '. Nothing sent');
     return { name, id: matches[0].id };
   });
   if (new Set(targets.map(t => t.id)).size !== targets.length) throw new Error('Duplicate group targets; nothing sent');
@@ -47,7 +51,6 @@ async function sendGroups(ctx) {
     ' messages from +' + p.sender + '. Order per group: link then announcement. No automatic retries.\n' + targets.map(t => t.name).join('\n'));
   const receipts = [];
   for (const target of targets) {
-    const ids = [];
     for (let i = 0; i < messages.length; i++) {
       let sent;
       try { sent = await axios.post(evoBase() + '/message/sendText/' + encodeURIComponent(inst.name),
@@ -56,7 +59,7 @@ async function sendGroups(ctx) {
         '. Previously confirmed: ' + receipts.length + '. Do not retry batch; inspect receipts.'); }
       const id = sent.data?.key?.id;
       if (!id) throw new Error('Receipt absent for ' + target.name + ' message ' + (i + 1) + '. Do not retry batch.');
-      ids.push(id); receipts.push({ group: target.name, message: i + 1, id });
+      receipts.push({ group: target.name, message: i + 1, id });
       try { await comment(taskId, target.name + ' | message ' + (i + 1) + '/2 accepted | id: ' + id + ' | ' + new Date().toISOString()); }
       catch (_) { throw new Error('Message accepted but receipt storage failed for ' + target.name + '. Do not retry batch.'); }
       await new Promise(resolve => setTimeout(resolve, 1000));
