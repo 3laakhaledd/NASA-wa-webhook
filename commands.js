@@ -11,8 +11,12 @@
 //   RUN: send-image <clickupTaskId> to <exact group name> from +9665XXXXXXXX
 //        Sends the task's single image attachment with its "WA Captions" custom field as the caption.
 //        Refuses unless the sender number is a connected line and exactly one group has that name.
+//   RUN: send-text to +RECIPIENT from +SENDER
+//        Description JSON: {approved:true,recipient:"digits",sender:"digits",messages:["text","text"]}.
+//        Private only, maximum two messages, durable pre-send claim, no automatic retries.
 const retrieval = require("./retrieval");
 const { unreadReport } = require("./unread");
+const { sendText } = require("./send-text");
 function install({ axios, api, token, listId, report, fetchGroups, lines, cron }) {
   const H = () => ({ headers: { Authorization: token }, timeout: 30000 });
   let busy = false;
@@ -87,7 +91,8 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
       " (line " + (lines.indexOf(inst.name) + 1) + "). WhatsApp message id: " + (s.data?.key?.id || "n/a") };
   }
 
-  async function run(cmd, desc) {
+  async function run(cmd, desc, taskId) {
+    if (/^send-text\b/i.test(cmd)) return sendText({ cmd, desc, taskId, axios, api, H, lines, evoBase, evoH, rename, comment });
     if (/^unread\b/i.test(cmd)) {
       const m = cmd.match(/^unread(?:\s+line\s+(\d+))?(?:\s+ending\s+(\d{4,15}))?$/i);
       if (!m) throw new Error("Use: RUN: unread line 1 ending 6444");
@@ -158,7 +163,7 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
       return { done: true, text: (verb === "week-score" ? "Scored metrics " : "Unreplied / late-replied numbers ") + from + " to " + to +
         " (line " + n + ")\n\n```\n" + JSON.stringify(r, null, 1) + "\n```" };
     }
-    throw new Error("Unknown command. Use: unread, groups, members, week-list, week-score, week-numbers, send-image");
+    throw new Error("Unknown command. Use: unread, groups, members, week-list, week-score, week-numbers, send-image, send-text");
   }
 
   async function tick() {
@@ -177,7 +182,7 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
       for (const t of found.slice(0, 3)) {
         const cmd = t.name.replace(/^\s*RUN\s*[:\-]\s*/i, "").replace(/\s*\(working\)$/, "").trim();
         try {
-          const out = await run(cmd, t.description || t.text_content);
+          const out = await run(cmd, t.description || t.text_content, t.id);
           if (!out.done) { if (!t.name.includes("(working)")) await rename(t.id, t.name + " (working)"); continue; }
           // Rename first so a one-shot command (send-image) can never run twice if the comment post fails.
           await rename(t.id, "DONE: " + cmd).catch(() => {});
