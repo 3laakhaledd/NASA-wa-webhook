@@ -1,6 +1,8 @@
 // ClickUp-driven commands: anyone (incl. ClickUp Brain) creates a task in the WA Reports list named "RUN: <command>".
 // The service picks it up within ~2 minutes, posts the result as comments, and renames the task DONE:/FAILED:.
 // Commands:
+//   RUN: daily-chats YYYY-MM-DD HH:MM HH:MM line N ending 6444
+//        Private time-window transcript with verified phone numbers; Riyadh time, end exclusive.
 //   RUN: unread line 1 ending 6444
 //        Private unread snapshot with verified phone mappings and before/after unread counters.
 //   RUN: groups [name filter] [line N]
@@ -92,6 +94,14 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
   }
 
   async function run(cmd, desc, taskId) {
+    if (/^daily-chats\b/i.test(cmd)) {
+      try {
+        return await require("./phone-numbers").dailyChatReport({ cmd, axios,
+          baseUrl: evoBase(), apiKey: evoH().headers.apikey, lines });
+      } catch (_) {
+        throw new Error("Private daily chat lookup failed. Check date/time, selected line, and verified source access; no complete report was produced.");
+      }
+    }
     if (/^send-text\b/i.test(cmd)) return sendText({ cmd, desc, taskId, axios, api, H, lines, evoBase, evoH, rename, comment });
     if (/^unread\b/i.test(cmd)) {
       const m = cmd.match(/^unread(?:\s+line\s+(\d+))?(?:\s+ending\s+(\d{4,15}))?$/i);
@@ -121,9 +131,9 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
     if (!instance) throw new Error("Unknown line " + n);
     if (verb === "groups" || verb === "members") {
       const filter = cmd.replace(/^\S+\s*/, "").replace(/\bline\s*\d\b/i, "").trim().toLowerCase().replace(/\s+/g, "");
-      if (verb === "members" && filter.length < 2) throw new Error("Give a group name, e.g. RUN: members Grade 5");
       const gs = (await fetchGroups(instance)).filter(g => !filter || String(g.subject || "").toLowerCase().replace(/\s+/g, "").includes(filter))
         .sort((a, b) => String(a.subject).localeCompare(String(b.subject), undefined, { numeric: true }));
+      if (verb === "members" && filter.length < 2) throw new Error("Give a group name, e.g. RUN: members Grade 5");
       if (verb === "groups") {
         const rows = gs.map(g => { const p = Array.isArray(g.participants) ? g.participants : [];
           return "| " + (g.subject || g.id) + " | " + (p.length || g.size || 0) + " | " + p.filter(x => x.admin).length + " |"; });
@@ -163,7 +173,7 @@ function install({ axios, api, token, listId, report, fetchGroups, lines, cron }
       return { done: true, text: (verb === "week-score" ? "Scored metrics " : "Unreplied / late-replied numbers ") + from + " to " + to +
         " (line " + n + ")\n\n```\n" + JSON.stringify(r, null, 1) + "\n```" };
     }
-    throw new Error("Unknown command. Use: unread, groups, members, week-list, week-score, week-numbers, send-image, send-text");
+    throw new Error("Unknown command. Use: daily-chats, unread, groups, members, week-list, week-score, week-numbers, send-image, send-text");
   }
 
   async function tick() {
