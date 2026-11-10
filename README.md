@@ -20,10 +20,22 @@ Set a strong random `WA_REPORT_READ_TOKEN` in the deployment's secret environmen
 
 Poll `status=running` until `status=complete` and `coverage.complete=true`. All individual conversations with inbound OR outbound records in the date window are considered, not just unanswered conversations. Group/broadcast/status conversations are excluded from the individual-contact list.
 
-Resolution uses direct phone JIDs, explicit message alternate phone identifiers, inbound sender phone identifiers, and, where needed, matching group-roster LID-to-phone pairs. The connected account is excluded. Conflicting mappings remain unresolved. Numeric LIDs are never treated as phone numbers. The service cannot manufacture numbers that WhatsApp has not exposed.
+Resolution uses direct phone JIDs, explicit message alternate phone identifiers, inbound sender phone identifiers, saved contacts, chat metadata, matching group-roster LID-to-phone pairs, and recent messages from each selected LID thread. Older sampled messages are identity evidence only, never included in the requested transcript. The connected account is excluded. Conflicting mappings remain unresolved. Numeric LIDs are never treated as phone numbers. The service cannot manufacture numbers that WhatsApp has not exposed. Mapping-source failures are explicitly reported in warnings.
 
 `contacts` contains phone numbers in international `+` format, names, mapping sources, and merged thread counts. Confirmed aliases are deduplicated within each school line. `uniquePhoneNumbers`, `resolvedThreads`, `unresolvedThreads`, and `individualThreads` distinguish phone totals from raw threads. `unresolved` lists names/reasons without internal IDs. `phoneNumbersComplete=false` means the phone-number list is incomplete even when message coverage is complete. An unresolved thread is not necessarily a distinct person.
 
 Follow BOTH `pagination.nextOffset` (set `offset`) and `unresolvedPagination.nextOffset` (set `unresolvedOffset`) until null. Limits are capped at 200. Do not mistake the existing weekly number report's unanswered-burst subset for all daily contacts.
 
-Tests: `node --test phone-numbers.test.js` (synthetic fixtures, no WhatsApp writes). Deploy the code and configure private authentication before live verification. No message sending, read-state changes, ClickUp command execution, or task creation is performed by this endpoint.
+## Private ClickUp time-window transcript (no new HTTP read token needed)
+
+Use the existing authorized WA Reports command bridge, only after approval to create the command task and post its private result:
+
+`RUN: daily-chats 2026-11-09 11:00 13:00 line 1 ending 6444`
+
+The existing two-minute command processor runs this server-side using the existing Evolution and ClickUp credentials. It does not depend on `WA_REPORT_READ_TOKEN`. Never trigger the public command-processing route for this workflow. The new command returns results only to the initiating task in the configured private report list, not to a public URL. Creating a command task causes private report comments to be posted; it is not a side-effect-free HTTP read.
+
+Times use 24-hour Asia/Riyadh time, start inclusive and end exclusive. The command verifies the connected school account before and after retrieval and retrieves the exact time window with the existing two-pass exhausted-pagination collector. It includes both sent and received individual-chat records, merges confirmed phone aliases, supplies transcript text, direction, local timestamps, message type and verified phone numbers, and explicitly flags missing numbers. Group, broadcast and status threads are excluded from this individual-contact report. No WhatsApp sends, read receipts, or settings changes are performed.
+
+The existing command processor chunks long results into comments. Reassemble all comment chunks in order before parsing the JSON or creating a PDF. No claim of live success should be made until the deployed command has been executed and its coverage and phone-number completeness checked.
+
+Tests: `node --test phone-numbers.test.js` (synthetic fixtures, no WhatsApp writes). Deploy the code before live verification. Private HTTP access still requires its own configured header token; the ClickUp command bridge is the alternative, not a public-authentication bypass.

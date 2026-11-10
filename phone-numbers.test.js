@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { phone, resolve, authorized, install } = require("./phone-numbers");
+const { phone, resolve, mappingEvidence, authorized, install } = require("./phone-numbers");
 // Synthetic fixtures only.
 const owner = "966500000000@s.whatsapp.net", pn = "966500000001@s.whatsapp.net";
 const lid = "111111111111111@lid";
@@ -63,4 +63,79 @@ test("route paginates every contact and unresolved entry independently", async (
   assert.equal(h.res.body.pagination.nextOffset, 1); assert.equal(h.res.body.unresolvedThreads, 1);
   assert.equal(h.res.body.contacts[0].number, "+966500000001");
   assert.equal(h.res.body.phoneNumbersComplete, false);
+});
+test("saved contact metadata resolves a LID without guessing", () => {
+  const r = resolve([msg(lid)], owner, [], { contacts: [{ id: lid, phoneNumber: "+966500000001" }] });
+  assert.equal(r.contacts[0].number, "+966500000001");
+});
+test("out-of-window evidence resolves identity but never adds report threads", () => {
+  const r = resolve([msg(lid)], owner, [], { evidenceRows: [
+    msg(lid, { previousRemoteJid: pn }),
+    msg("966500000009@s.whatsapp.net")
+  ] });
+  assert.equal(r.individualThreads, 1);
+  assert.equal(r.uniquePhoneNumbers, 1);
+});
+test("conflicts between contact and message records stay unresolved", () => {
+  const r = resolve([msg(lid, { remoteJidAlt: pn })], owner, [],
+    { contacts: [{ id: lid, jid: "966500000002@s.whatsapp.net" }] });
+  assert.equal(r.phoneNumbersComplete, false);
+});
+test("identity lookup uses only read endpoints and checks message ownership", async () => {
+  const calls = [];
+  const axios = {
+    post: async (url, body) => {
+      calls.push(url);
+      if (url.includes("findContacts")) return { data: body.page === 1 ? [{ id: lid, jid: pn }] : [] };
+      if (url.includes("findChats")) return { data: [] };
+      return { data: { messages: { records: [msg(lid, { remoteJidAlt: pn })] } } };
+    },
+    get: async url => { calls.push(url); return { data: [] }; }
+  };
+  const e = await mappingEvidence({ rows: [msg(lid)], axios, baseUrl: "https://example.invalid", apiKey: "test", instance: "test" });
+  assert.equal(e.contacts.length, 1); assert.equal(e.evidenceRows.length, 1);
+  assert.ok(calls.every(url => /findContacts|findChats|findMessages|fetchAllGroups/.test(url)));
+});
+test("repeated contact pagination stops safely and reports its limitation", async () => {
+  const e = await mappingEvidence({ rows: [msg(lid)], baseUrl: "https://example.invalid", instance: "test",
+    axios: {
+      post: async url => url.includes("findContacts") ? { data: [{ id: lid, jid: pn }] } :
+        url.includes("findChats") ? { data: [] } : { data: { messages: { records: [] } } },
+      get: async () => ({ data: [] })
+    } });
+  assert.ok(e.warnings.includes("Saved-contact mapping lookup incomplete."));
+});
+test("private daily report uses exact Riyadh bounds, both directions, and excludes identity-sample text", async () => {
+  const vm = require("node:vm"), fs = require("node:fs"), module = { exports: {} };
+  const start = Date.parse("2026-11-09T08:00:00Z") / 1000;
+  const rows = [
+    { ...msg(lid), messageTimestamp: start, message: { conversation: "in window" } },
+    { ...msg(lid, {}, true), messageTimestamp: start + 60, message: { conversation: "reply" } }
+  ];
+  const retrieval = {
+    dayBounds: () => ({ start: start - 11 * 3600 }),
+    textOf: m => m.message?.conversation || "",
+    verifiedCollect: async (read, where, bounds) => {
+      assert.equal(bounds.start, start); assert.equal(bounds.end, start + 7200);
+      assert.equal(where.messageTimestamp.gte, "2026-11-09T08:00:00.000Z");
+      return { rows, coverage: { complete: true, passesVerified: 2 } };
+    }
+  };
+  vm.runInNewContext(fs.readFileSync(__dirname + "/phone-numbers.js", "utf8"), {
+    module, process, require: name => name === "./retrieval" ? retrieval : require(name)
+  });
+  const axios = {
+    get: async url => ({ data: url.includes("fetchInstances") ? [{ name: "test", ownerJid: owner }] : [] }),
+    post: async url => url.includes("findMessages") ? { data: { messages: { records: [
+      { ...msg(lid, { remoteJidAlt: pn }), messageTimestamp: start - 1000, message: { conversation: "outside sample" } }
+    ] } } } : { data: [] }
+  };
+  const out = await module.exports.dailyChatReport({ cmd: "daily-chats 2026-11-09 11:00 13:00 line 1 ending 0000",
+    axios, baseUrl: "https://example.invalid", apiKey: "test", lines: ["test"] });
+  const data = JSON.parse(out.text.split("```json\n")[1].split("\n```")[0]);
+  assert.equal(data.chats[0].number, "+966500000001");
+  assert.equal(data.chats[0].sent, 1); assert.equal(data.chats[0].received, 1);
+  assert.equal(data.chats[0].messages.length, 2);
+  assert.ok(!out.text.includes("outside sample"));
+  assert.ok(!out.text.includes(lid));
 });
