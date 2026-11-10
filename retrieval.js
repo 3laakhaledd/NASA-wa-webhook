@@ -274,6 +274,7 @@ function install(app, { axios, baseUrl, apiKey, instance }) {
         chats: list.slice(offset, offset + limit) });
     } catch (e) { res.status(502).json({ error: "Chat retrieval failed", coverage: { complete: false } }); }
   });
+  require("./phone-numbers").install(app, { ensureJob, axios, baseUrl, apiKey, instance });
   return { request, verifiedCollect };
 }
-module.exports = { VERSION, dayBounds, jidOf, textOf, collectPass, verifiedCollect, aggregate, install };
+module.exports = { VERSION, timestamp, jidOf, textOf, dayBounds, category, aggregate, collectPass, verifiedCollect, install };
