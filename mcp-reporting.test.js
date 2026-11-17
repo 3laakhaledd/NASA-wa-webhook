@@ -1,20 +1,13 @@
 "use strict";
-const test = require("node:test");
-const assert = require("node:assert/strict");
-const { install } = require("./mcp-reporting");
-const { aggregate, dayBounds } = require("./retrieval");
+const test = require("node:test"), assert = require("node:assert/strict");
+const { install } = require("./mcp-reporting"), { aggregate, dayBounds } = require("./retrieval");
 // Synthetic credentials and contacts only. Never calls a real service.
 const key = "synthetic-mcp-key-00000000000000000000000000000000";
 const owner = "966500000000@s.whatsapp.net", pn = "966500000001@s.whatsapp.net", lid = "111111111111111@lid";
 const date = "2026-11-16", bounds = dayBounds(date);
 const rows = [[lid, false], [pn, true], ["222222222222222@lid", false], ["123@g.us", false], [owner, true]].map(([jid, fromMe], i) => ({ id: "synthetic-" + i, key: { remoteJid: jid, fromMe }, messageTimestamp: bounds.start + i, pushName: "Synthetic contact", messageType: "conversation", message: { conversation: "synthetic text" } }));
 const baseJob = () => ({ status: "complete", date, rows, ...aggregate(rows), identity: { name: "nasa-test", ownerJid: owner }, coverage: { complete: true, passesVerified: 2, passes: ["internal-audit"] }, window: { start: new Date(bounds.start * 1000).toISOString(), endExclusive: new Date(bounds.end * 1000).toISOString(), timezone: "Asia/Riyadh" } });
-const resolved = () => ({ byJid: new Map([
-  [lid, { phoneNumber: "+966500000001", phoneNumberStatus: "verified", phoneNumberSources: ["alternate"], phoneNumberReason: null }],
-  [pn, { phoneNumber: "+966500000001", phoneNumberStatus: "verified", phoneNumberSources: ["phone JID"], phoneNumberReason: null }],
-  ["222222222222222@lid", { phoneNumber: null, phoneNumberStatus: "unresolved", phoneNumberSources: [], phoneNumberReason: "phone not exposed" }],
-  [owner, { phoneNumber: null, phoneNumberStatus: "school_account", phoneNumberSources: [], phoneNumberReason: null }]
-]), totals: { individualThreads: 3, resolvedThreads: 2, uniquePhoneNumbers: 1, unresolvedThreads: 1, phoneNumbersComplete: false } });
+const resolved = () => ({ byJid: new Map([[lid, { phoneNumber: "+966500000001", phoneNumberStatus: "verified", phoneNumberSources: ["alternate"], phoneNumberReason: null }], [pn, { phoneNumber: "+966500000001", phoneNumberStatus: "verified", phoneNumberSources: ["phone JID"], phoneNumberReason: null }], ["222222222222222@lid", { phoneNumber: null, phoneNumberStatus: "unresolved", phoneNumberSources: [], phoneNumberReason: "phone not exposed" }], [owner, { phoneNumber: null, phoneNumberStatus: "school_account", phoneNumberSources: [], phoneNumberReason: null }]]), totals: { individualThreads: 3, resolvedThreads: 2, uniquePhoneNumbers: 1, unresolvedThreads: 1, phoneNumbersComplete: false } });
 function harness(options = {}) {
   let handler, reads = 0, mappings = 0;
   const api = { identity: async () => { reads++; return { name: "nasa-test", ownerJid: owner, connectionStatus: "open" }; }, getDailyJob: d => { reads++; assert.equal(d, date); return baseJob(); }, resolveDailyNumbers: async () => { mappings++; return resolved(); }, ...options.api };
@@ -28,64 +21,57 @@ function harness(options = {}) {
 const rpc = (method, params = {}, id = 1) => ({ jsonrpc: "2.0", method, params, id });
 const call = (name, args = { line: 1, date }) => rpc("tools/call", { name, arguments: args });
 const parse = res => JSON.parse(res.body.result.content[0].text);
-test("MCP refuses missing/weak credentials before any data access", async () => {
-  for (const apiKey of ["", "short", " " + key]) { const h = harness({ config: { apiKey } }), r = await h.send(rpc("tools/list")); assert.equal(r.code, 503); assert.equal(h.reads(), 0); }
-});
-test("MCP accepts protected bearer or x-api-key, not missing/wrong/conflicting credentials", async () => {
-  const h = harness();
-  for (const headers of [{}, { authorization: "Bearer wrong" }, { authorization: "Bearer " + key, "x-api-key": "wrong" }]) assert.equal((await h.send(rpc("tools/list"), headers)).code, 401);
-  assert.equal((await h.send(rpc("tools/list"), { "x-api-key": key })).code, 200); assert.equal(h.reads(), 0);
-});
-test("MCP rejects URL credentials and untrusted browser origins", async () => {
-  const h = harness();
-  assert.equal((await h.send(rpc("tools/list"), undefined, { key })).code, 400);
-  assert.equal((await h.send(rpc("tools/list"), { authorization: "Bearer " + key, origin: "https://evil.invalid" })).code, 403); assert.equal(h.reads(), 0);
-});
-test("MCP supports initialization, ping, notifications, JSON-only stateless transport", async () => {
-  const h = harness(), init = await h.send(rpc("initialize", { protocolVersion: "2025-06-18" }));
-  assert.equal(init.body.result.protocolVersion, "2025-06-18"); assert.equal(init.body.result.serverInfo.name, "nasa-wa-reporting");
-  assert.deepEqual((await h.send(rpc("ping"))).body.result, {});
-  const notice = await h.send({ jsonrpc: "2.0", method: "notifications/initialized" }); assert.equal(notice.code, 202);
-  for (const method of ["GET", "DELETE", "PUT"]) assert.equal((await h.send({}, undefined, {}, method)).code, 405);
-  assert.equal(init.headers["Cache-Control"], "no-store");
-});
-test("MCP advertises only three read-only reporting tools", async () => {
-  const r = await harness().send(rpc("tools/list")); assert.equal(r.body.result.tools.length, 3);
-  for (const t of r.body.result.tools) { assert.equal(t.annotations.readOnlyHint, true); assert.equal(t.annotations.destructiveHint, false); assert.equal(t.inputSchema.additionalProperties, false); }
-});
-test("MCP validates arguments before upstream reads", async () => {
-  const h = harness();
-  for (const args of [{ line: 0, date }, { line: 4, date }, { line: 1, date: "2026-02-30" }, { line: 1, date, limit: 0 }, { line: 1, date, offset: -1 }, { line: 1, date, endpoint: "/run" }]) assert.equal((await h.send(call("nasa_wa_daily_report", args))).body.result.isError, true);
-  assert.equal(h.reads(), 0);
-});
-test("MCP reads account identity without operational connection routes", async () => {
-  const selected = [], h = harness({ selected }), r = parse(await h.send(call("nasa_wa_connection_status", { line: 3 })));
-  assert.equal(r.accountNumber, "+966500000000"); assert.deepEqual(selected, ["nasa-test-3"]); assert.equal(h.mappings(), 0);
-});
-test("MCP merges phone aliases and independently paginates unresolved contacts", async () => {
-  const h = harness(), a = parse(await h.send(call("nasa_wa_daily_report", { line: 1, date, limit: 1 })));
-  assert.equal(a.chats.length, 1); assert.equal(a.chats[0].number, "+966500000001"); assert.equal(a.chats[0].rawThreadCount, 2); assert.equal(a.chats[0].messageCount, 2);
-  assert.equal(a.chats[0].sent, 1); assert.equal(a.chats[0].received, 1); assert.equal(a.pagination.total, 2); assert.equal(a.pagination.nextOffset, 1); assert.equal(a.phoneNumbersComplete, false); assert.equal(a.coverage.passes, undefined);
-  const b = parse(await h.send(call("nasa_wa_daily_report", { line: 1, date, limit: 1, offset: 1 })));
-  assert.equal(b.chats[0].number, null); assert.equal(b.pagination.nextOffset, null); assert.ok(!JSON.stringify(a).includes(lid)); assert.ok(!JSON.stringify(b).includes("222222222222222@lid"));
-});
-test("MCP message pages exclude groups/self and preserve direction/time", async () => {
-  const h = harness(), a = parse(await h.send(call("nasa_wa_daily_messages", { line: 1, date, limit: 2 })));
-  assert.equal(a.messages.length, 2); assert.equal(a.pagination.total, 3); assert.equal(a.messages[0].timeRiyadh, "2026-11-16T00:00:00+03:00");
-  assert.equal(a.messages[0].direction, "received"); assert.equal(a.messages[1].direction, "sent"); assert.equal(a.messages[1].number, "+966500000001"); assert.equal(a.pagination.nextOffset, 2);
-  assert.ok(!JSON.stringify(a).includes("@g.us")); assert.ok(!JSON.stringify(a).includes("@lid"));
-});
-test("MCP running/failed jobs never become zero-activity complete reports", async () => {
-  for (const status of ["running", "failed"]) { const h = harness({ api: { getDailyJob: () => ({ status, coverage: { complete: false } }) } }); const r = parse(await h.send(call("nasa_wa_daily_report"))); assert.equal(r.status, status); assert.equal(r.phoneNumbersComplete, false); assert.equal(r.chats, undefined); assert.equal(h.mappings(), 0); }
-});
-test("MCP rejects mismatched dates, windows and line identity", async () => {
-  for (const change of [{ date: "2026-11-15" }, { identity: { name: "other" } }, { window: { timezone: "UTC" } }]) { const h = harness({ api: { getDailyJob: () => ({ ...baseJob(), ...change }) } }); const r = await h.send(call("nasa_wa_daily_report")); assert.equal(r.body.result.isError, true); assert.equal(h.mappings(), 0); }
-});
-test("MCP sanitizes upstream errors and has no arbitrary API/operational tool", async () => {
-  const h = harness({ api: { resolveDailyNumbers: async () => { throw Error("PRIVATE secret payload"); } } }); const r = await h.send(call("nasa_wa_daily_report"));
-  assert.equal(r.body.result.isError, true); assert.ok(!JSON.stringify(r).includes("PRIVATE")); assert.equal((await h.send(call("send-text"))).body.result.isError, true); assert.equal((await h.send(rpc("unknown"))).body.error.code, -32601);
-});
-test("MCP rejects invalid JSON-RPC batches/ids and unsupported protocol headers", async () => {
-  const h = harness(); for (const body of [[], null, { method: "ping", id: 1 }, { jsonrpc: "2.0", method: "ping", id: {} }]) assert.equal((await h.send(body)).body.error.code, -32600);
-  assert.equal((await h.send(rpc("ping"), { authorization: "Bearer " + key, "mcp-protocol-version": "invalid" })).code, 400);
-});
+test("MCP refuses missing/weak credentials before any data access", async () => { for (const apiKey of ["", "short", " " + key]) { const h = harness({ config: { apiKey } }), r = await h.send(rpc("tools/list")); assert.equal(r.code, 503); assert.equal(h.reads(), 0); } });
+test("MCP accepts protected bearer or x-api-key, not missing/wrong/conflicting credentials", async () => { const h = harness(); for (const headers of [{}, { authorization: "Bearer wrong" }, { authorization: "Bearer " + key, "x-api-key": "wrong" }]) assert.equal((await h.send(rpc("tools/list"), headers)).code, 401); assert.equal((await h.send(rpc("tools/list"), { "x-api-key": key })).code, 200); assert.equal(h.reads(), 0); });
+test("MCP rejects URL credentials and untrusted browser origins", async () => { const h = harness(); assert.equal((await h.send(rpc("tools/list"), undefined, { key })).code, 400); assert.equal((await h.send(rpc("tools/list"), { authorization: "Bearer " + key, origin: "https://evil.invalid" })).code, 403); assert.equal(h.reads(), 0); });
+test("MCP supports initialization, ping, notifications, JSON-only stateless transport", async () => { const h = harness(), init = await h.send(rpc("initialize", { protocolVersion: "2025-06-18" })); assert.equal(init.body.result.protocolVersion, "2025-06-18"); assert.equal(init.body.result.serverInfo.name, "nasa-wa-reporting"); assert.deepEqual((await h.send(rpc("ping"))).body.result, {}); const notice = await h.send({ jsonrpc: "2.0", method: "notifications/initialized" }); assert.equal(notice.code, 202); for (const method of ["GET", "DELETE", "PUT"]) assert.equal((await h.send({}, undefined, {}, method)).code, 405); assert.equal(init.headers["Cache-Control"], "no-store"); });
+test("MCP advertises eight read-only reporting tools", async () => { const r = await harness().send(rpc("tools/list")); assert.equal(r.body.result.tools.length, 8); for (const t of r.body.result.tools) { assert.equal(t.annotations.readOnlyHint, true); assert.equal(t.annotations.destructiveHint, false); assert.equal(t.inputSchema.additionalProperties, false); } });
+test("MCP validates arguments before upstream reads", async () => { const h = harness(); for (const args of [{ line: 0, date }, { line: 4, date }, { line: 1, date: "2026-02-30" }, { line: 1, date, limit: 0 }, { line: 1, date, offset: -1 }, { line: 1, date, endpoint: "/run" }]) assert.equal((await h.send(call("nasa_wa_daily_report", args))).body.result.isError, true); assert.equal(h.reads(), 0); });
+test("MCP reads account identity without operational connection routes", async () => { const selected = [], h = harness({ selected }), r = parse(await h.send(call("nasa_wa_connection_status", { line: 3 }))); assert.equal(r.accountNumber, "+966500000000"); assert.deepEqual(selected, ["nasa-test-3"]); assert.equal(h.mappings(), 0); });
+test("MCP merges phone aliases and independently paginates unresolved contacts", async () => { const h = harness(), a = parse(await h.send(call("nasa_wa_daily_report", { line: 1, date, limit: 1 }))); assert.equal(a.chats.length, 1); assert.equal(a.chats[0].number, "+966500000001"); assert.equal(a.chats[0].rawThreadCount, 2); assert.equal(a.chats[0].messageCount, 2); assert.equal(a.chats[0].sent, 1); assert.equal(a.chats[0].received, 1); assert.equal(a.pagination.total, 2); assert.equal(a.pagination.nextOffset, 1); assert.equal(a.phoneNumbersComplete, false); assert.equal(a.coverage.passes, undefined); const b = parse(await h.send(call("nasa_wa_daily_report", { line: 1, date, limit: 1, offset: 1 }))); assert.equal(b.chats[0].number, null); assert.equal(b.pagination.nextOffset, null); assert.ok(!JSON.stringify(a).includes(lid)); assert.ok(!JSON.stringify(b).includes("222222222222222@lid")); });
+test("MCP message pages exclude groups/self and preserve direction/time", async () => { const h = harness(), a = parse(await h.send(call("nasa_wa_daily_messages", { line: 1, date, limit: 2 }))); assert.equal(a.messages.length, 2); assert.equal(a.pagination.total, 3); assert.equal(a.messages[0].timeRiyadh, "2026-11-16T00:00:00+03:00"); assert.equal(a.messages[0].direction, "received"); assert.equal(a.messages[1].direction, "sent"); assert.equal(a.messages[1].number, "+966500000001"); assert.equal(a.pagination.nextOffset, 2); assert.ok(!JSON.stringify(a).includes("@g.us")); assert.ok(!JSON.stringify(a).includes("@lid")); });
+test("MCP running/failed jobs never become zero-activity complete reports", async () => { for (const status of ["running", "failed"]) { const h = harness({ api: { getDailyJob: () => ({ status, coverage: { complete: false } }) } }); const r = parse(await h.send(call("nasa_wa_daily_report"))); assert.equal(r.status, status); assert.equal(r.phoneNumbersComplete, false); assert.equal(r.chats, undefined); assert.equal(h.mappings(), 0); } });
+test("MCP rejects mismatched dates, windows and line identity", async () => { for (const change of [{ date: "2026-11-15" }, { identity: { name: "other" } }, { window: { timezone: "UTC" } }]) { const h = harness({ api: { getDailyJob: () => ({ ...baseJob(), ...change }) } }); const r = await h.send(call("nasa_wa_daily_report")); assert.equal(r.body.result.isError, true); assert.equal(h.mappings(), 0); } });
+test("MCP sanitizes upstream errors and has no arbitrary API/operational tool", async () => { const h = harness({ api: { resolveDailyNumbers: async () => { throw Error("PRIVATE secret payload"); } } }); const r = await h.send(call("nasa_wa_daily_report")); assert.equal(r.body.result.isError, true); assert.ok(!JSON.stringify(r).includes("PRIVATE")); assert.equal((await h.send(call("send-text"))).body.result.isError, true); assert.equal((await h.send(rpc("unknown"))).body.error.code, -32601); });
+test("MCP rejects invalid JSON-RPC batches/ids and unsupported protocol headers", async () => { const h = harness(); for (const body of [[], null, { method: "ping", id: 1 }, { jsonrpc: "2.0", method: "ping", id: {} }]) assert.equal((await h.send(body)).body.error.code, -32600); assert.equal((await h.send(rpc("ping"), { authorization: "Bearer " + key, "mcp-protocol-version": "invalid" })).code, 400); });
+
+// CX regression tests: synthetic fixtures and an explicit clock only.
+{
+const cx = require("./cx-reporting"), { resolve } = require("./phone-numbers");
+const clock = Date.parse("2026-11-17T14:30:00+03:00");
+const t = (d, hh) => Date.parse(d + "T" + hh + ":00+03:00") / 1000;
+const pn2 = "966500000002@s.whatsapp.net", gid = "123@g.us", unresolved = "222222222222222@lid";
+const data = [[lid, false, "2026-11-16", "09:00", "request"], [pn, true, "2026-11-16", "09:20", "school event"], [lid, false, "2026-11-17", "10:00", "thank you"], [pn2, false, "2026-11-16", "12:00", "another request"], [pn2, true, "2026-11-17", "09:00", "later reply"], [unresolved, false, "2026-11-17", "11:00", null], [gid, false, "2026-11-16", "09:00", "group text"], [owner, true, "2026-11-16", "09:00", "self"]].map(([jid, fromMe, d, hh, text], i) => ({ id: "cx-" + i, key: { remoteJid: jid, fromMe, ...(jid === lid ? { remoteJidAlt: pn } : {}) }, messageTimestamp: t(d, hh), pushName: "SENDER NOT GROUP SUBJECT", messageType: text ? "conversation" : "audioMessage", message: text ? { conversation: text } : { audioMessage: {} } }));
+function mappings(job) {
+  const totals = resolve(job.rows, job.identity.ownerJid), byJid = new Map();
+  for (const jid of new Set(job.rows.map(m => m.key.remoteJid))) {
+    if (!jid.endsWith("@lid") && !jid.endsWith("@s.whatsapp.net")) continue;
+    const sub = resolve(job.rows.filter(m => m.key.remoteJid === jid), job.identity.ownerJid, [], { evidenceRows: job.rows }), c = sub.contacts[0];
+    byJid.set(jid, { phoneNumber: c?.number || null, phoneNumberStatus: c ? "verified" : sub.excludedSchoolThreads ? "school_account" : "unresolved", phoneNumberReason: sub.unresolved[0]?.reason || null });
+  }
+  return { totals, byJid };
+}
+function cxHarness(options = {}) {
+  let school = owner, reads = 0; const accounts = new Map();
+  for (const instance of ["nasa-test", "nasa-test-2", "nasa-test-3"]) accounts.set(instance, { identity: async () => ({ name: instance, ownerJid: school, connectionStatus: "open" }), request: async () => { throw Error("mock collector only"); }, verifiedCollect: async (_read, where, bounds) => { reads++; assert.equal(Date.parse(where.messageTimestamp.gte) / 1000, bounds.start); assert.equal(Date.parse(where.messageTimestamp.lte) / 1000, bounds.end - 1); return { rows: data.filter(m => m.messageTimestamp >= bounds.start && m.messageTimestamp < bounds.end), coverage: { complete: !options.incomplete, passesVerified: 2, exhaustionVerified: true, passes: ["audit"] } }; }, resolveDailyNumbers: async job => mappings(job) });
+  const calls = [];
+  const config = { lines: [...accounts.keys()], getApi: name => accounts.get(name), now: () => clock, axios: { get: async (url, opts) => { calls.push({ url, opts }); if (options.noSubjects) throw Error("private upstream payload"); return { data: [{ id: gid, subject: "Grade 5", size: 20 }] }; } }, baseUrl: "https://example.invalid", apiKey: "synthetic-evolution", unreadReader: async () => ({ accountNumber: "+966500000000", snapshotAt: "before", checkedAt: "after", autoReadMessages: false, warnings: [], unreadChatRecords: 5, newlyUnreadChats: 1, items: [{ name: "Synthetic", number: "+966500000001", unreadBefore: 2, unreadAfter: 2, counterUnchanged: true }, { name: "Alias", number: "+966500000001", unreadBefore: 1, unreadAfter: 0, counterUnchanged: false }, { name: unresolved, number: null, unreadBefore: 1, unreadAfter: null, counterUnchanged: null }, { name: "School", number: "+966500000000", unreadBefore: 1, unreadAfter: 1, counterUnchanged: true }], groups: [{ name: "UNVERIFIED SENDER NAME", unreadBefore: 4, unreadAfter: 4 }] }) };
+  return { service: cx.create(config), config, calls, reads: () => reads, changeAccount: () => { school = "966500000099@s.whatsapp.net"; } };
+}
+async function complete(service, name, args) { for (let i = 0; i < 15; i++) { const r = await service.call(name, args); if (r.status !== "running") return r; await new Promise(resolve => setImmediate(resolve)); } throw Error("Fixture job did not finish"); }
+const range = { line: 1, fromDate: "2026-11-16", throughDate: "2026-11-17" };
+test("CX exposes five tools with strict read-only schemas", () => { const defs = cx.definitions(3); assert.equal(defs.length, 5); assert.equal(new Set(defs.map(t => t.name)).size, 5); assert.ok(defs.every(t => t.annotations.readOnlyHint && !t.annotations.destructiveHint && !t.inputSchema.additionalProperties)); });
+test("CX validation rejects stale queues, future/oversized ranges and guessed identity", () => { for (const [name, args] of [[cx.NAMES.queue, { ...range, throughDate: "2026-11-16" }], [cx.NAMES.queue, { ...range, throughDate: "2026-11-18" }], [cx.NAMES.queue, { ...range, fromDate: "2026-10-01" }], [cx.NAMES.history, { lines: [1, 1], number: "+966500000001", fromDate: range.fromDate, throughDate: range.throughDate }], [cx.NAMES.history, { lines: [1], number: lid, fromDate: range.fromDate, throughDate: range.throughDate }], [cx.NAMES.unread, { line: 1, method: "markAsRead" }], [cx.NAMES.groups, { line: 1, date: range.fromDate, view: "messages" }]]) assert.throws(() => cx.validate(name, args, 3, clock)); });
+test("CX queue checks later replies, merges aliases and labels acknowledgments as candidates only", async () => { const h = cxHarness(), r = await complete(h.service, cx.NAMES.queue, range); assert.equal(r.status, "complete"); assert.equal(r.coverage.passesVerified, 2); assert.equal(r.summary.candidateContactsOrUnresolvedThreads, 2); assert.ok(!r.candidates.some(c => c.number === "+966500000002")); const c = r.candidates.find(c => c.number === "+966500000001"); assert.equal(c.rawThreadCount, 2); assert.equal(c.candidateOnly, true); assert.equal(c.resolutionStatus, "not_assessed"); assert.equal(c.lastMessage.text, "thank you"); assert.equal(r.summary.confirmedUnansweredRequests, null); assert.ok(!JSON.stringify(r).includes("@lid")); });
+test("CX history keeps selected-line associations, verified identity and pagination", async () => { const h = cxHarness(), r = await complete(h.service, cx.NAMES.history, { lines: [1, 2], number: "+966500000001", fromDate: range.fromDate, throughDate: range.throughDate, limit: 2 }); assert.equal(r.coverageByLine.length, 2); assert.equal(r.pagination.total, 6); assert.equal(r.pagination.nextOffset, 2); assert.equal(r.phoneNumbersComplete, false); assert.ok(r.messages.every(m => m.number === "+966500000001")); assert.ok(!JSON.stringify(r.messages).includes("another request")); });
+test("CX business time excludes Friday/Saturday and out-of-hours waits", () => { const schedule = { workingDays: [0, 1, 2, 3, 4], openTime: "09:00", closeTime: "17:00" }; assert.equal(cx.businessSeconds(t("2026-11-19", "16:50"), t("2026-11-22", "09:10"), schedule), 1200); assert.equal(cx.businessSeconds(t("2026-11-16", "17:00"), t("2026-11-17", "09:00"), schedule), 0); });
+test("CX response metrics require a schedule and separate answered and pending SLA breaches", async () => { const h = cxHarness(), args = { ...range, throughDate: "2026-11-16", workingDays: [0, 1, 2, 3, 4], openTime: "09:00", closeTime: "17:00", slaMinutes: 15 }; assert.throws(() => cx.validate(cx.NAMES.metrics, range, 3, clock)); const r = await complete(h.service, cx.NAMES.metrics, args); assert.equal(r.summary.respondedEpisodes, 1); assert.equal(r.summary.pendingEpisodes, 1); assert.equal(r.summary.answeredSlaBreaches, 1); assert.equal(r.summary.pendingSlaBreaches, 1); assert.equal(r.summary.meanAnsweredBusinessSeconds, 1200); assert.ok(r.episodes.every(e => e.semanticAnswerVerified === false)); });
+test("CX text eligibility excludes reactions/media/filenames but accepts wrapped text", () => { assert.equal(cx.eligibleText({ messageType: "reactionMessage", message: { conversation: "x" } }), false); assert.equal(cx.eligibleText({ message: { documentMessage: { fileName: "reply.pdf" } } }), false); assert.equal(cx.eligibleText({ message: { audioMessage: {} } }), false); assert.equal(cx.eligibleText({ message: { ephemeralMessage: { message: { conversation: "text" } } } }), true); });
+test("CX same-second opposite directions are excluded from response timings", () => { const rows = [false, true].map((fromMe, i) => ({ id: "tie" + i, key: { remoteJid: pn, fromMe }, messageTimestamp: t("2026-11-16", "12:00"), message: { conversation: "text" } })); const job = { end: t("2026-11-16", "17:00"), rows, ...aggregate(rows), resolved: null, identity: { ownerJid: owner }, coverage: { complete: true } }; job.resolved = mappings(job); const r = cx.metrics(job, { line: 1, workingDays: [1], openTime: "09:00", closeTime: "17:00", slaMinutes: 15 }); assert.equal(r.summary.sameSecondAmbiguousRecords, 2); assert.equal(r.summary.respondedEpisodes, 0); assert.equal(r.summary.meanAnsweredBusinessSeconds, null); });
+test("CX unread groups verified aliases but never calls mark-as-read or exposes sender-as-group names", async () => { const h = cxHarness(), r = await h.service.call(cx.NAMES.unread, { line: 1, limit: 1 }); assert.equal(r.summary.uniqueVerifiedIndividualNumbers, 1); assert.equal(r.summary.unresolvedIndividualThreads, 1); assert.equal(r.contacts[0].rawThreadCount, 2); assert.equal(r.contacts[0].countersUnchanged, false); assert.equal(r.summary.groupUnreadBefore, 4); assert.equal(r.pagination.nextOffset, 1); assert.ok(!JSON.stringify(r).includes("UNVERIFIED SENDER NAME")); assert.equal(h.calls.length, 0); });
+test("CX groups use actual subjects and private message pagination without member-number exports", async () => { const h = cxHarness(), args = { line: 1, date: "2026-11-16" }; const r = await complete(h.service, cx.NAMES.groups, args); assert.equal(r.groups[0].subject, "Grade 5"); assert.equal(r.groups[0].messageCount, 1); assert.ok(!JSON.stringify(r.groups).includes("SENDER NOT GROUP SUBJECT")); assert.equal(h.calls[0].opts.params.getParticipants, "false"); const messages = await complete(h.service, cx.NAMES.groups, { ...args, view: "messages", groupId: gid }); assert.equal(messages.messages[0].text, "group text"); assert.equal(messages.messages[0].subject, "Grade 5"); assert.ok(!Object.hasOwn(messages.messages[0], "participant")); });
+test("CX missing group metadata remains missing, not a made-up title", async () => { const h = cxHarness({ noSubjects: true }), args = { line: 1, date: "2026-11-16" }; const r = await complete(h.service, cx.NAMES.groups, args); assert.equal(r.subjectsAvailable, false); assert.equal(r.groups[0].subject, null); await assert.rejects(() => h.service.call(cx.NAMES.groups, { ...args, groupName: "Grade 5" }), /subjects unavailable/); });
+test("CX incomplete verification never becomes an empty success", async () => { const h = cxHarness({ incomplete: true }), r = await complete(h.service, cx.NAMES.queue, range); assert.equal(r.status, "failed"); assert.equal(r.coverage.complete, false); assert.equal(r.candidates, undefined); });
+test("CX account changes invalidate cached reports", async () => { const h = cxHarness(); await complete(h.service, cx.NAMES.queue, range); h.changeAccount(); await assert.rejects(() => h.service.call(cx.NAMES.queue, range), /account changed/); });
+test("MCP protects all five CX tools behind the existing key", async () => { const h = harness(); for (const name of Object.values(cx.NAMES)) { const r = await h.send(call(name, {}), {}); assert.equal(r.code, 401); } assert.equal(h.reads(), 0); const invalid = await h.send(call(cx.NAMES.queue, { line: 1, fromDate: "invalid", throughDate: "invalid" })); assert.equal(invalid.body.result.isError, true); assert.equal(h.reads(), 0); });
+}
