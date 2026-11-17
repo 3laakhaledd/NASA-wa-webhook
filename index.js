@@ -27,6 +27,8 @@ LINES.forEach((name, i) => {
   apis.set(name, i === 0 ? api : retrieval.install(router, { ...evoOpts, instance: name }));
   if (i > 0) app.use("/line/" + (i + 1), router);
 });
+// Direct ClickUp MCP reporting. Disabled until a strong key is set privately in Railway.
+require("./mcp-reporting").install(app, { lines: LINES, getApi: name => apis.get(name) });
 app.use("/line/1", (req, res) => res.redirect(307, req.originalUrl.replace(/^\/line\/1/, "") || "/"));
 const lines = linesLib.create({ ...evoOpts, lines: LINES, connectKey: process.env.CONNECT_KEY || "" });
 lines.install(app);
@@ -64,6 +66,7 @@ app.get("/", (req, res) => res.json({
   status: "ok", service: "spen-wa-insights", version: retrieval.VERSION, build: unreadRoute.BUILD,
   lines: LINES.map((name, i) => ({ line: i + 1, instance: name })),
   endpoints: {
+    mcp: "POST /mcp (read-only MCP; NASA_WA_MCP_API_KEY via Authorization Bearer or X-API-Key; never URL credentials)",
     clickupCheck: "GET /clickup-check (which ClickUp workspace/list the service writes to)",
     weekReport: "GET /report/week?from=YYYY-MM-DD&to=YYYY-MM-DD&days=0,1,2,3,4&line=N (individual customer chats, compact)",
     unread: "GET /unread?line=N (live unread counters, names only, read-only)",
@@ -214,11 +217,9 @@ app.get("/groups", async (req, res) => {
       .sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true }));
     res.set("Cache-Control", "no-store");
     res.json({ instance, line: LINES.indexOf(instance) + 1, totalGroups: groups.length,
-      note: "Counts only; participant numbers are never returned. Counts include the connected account itself.",
-      groups });
+      note: "Counts only; participant numbers are never returned. Counts include the connected account itself.", groups });
   } catch (e) {
-    res.status(e.client ? 400 : 502).json({ error: e.client ? e.message :
-      "Group retrieval failed" + (e.response?.status ? " (HTTP " + e.response.status + ")" : "") });
+    res.status(e.client ? 400 : 502).json({ error: e.client ? e.message : "Group retrieval failed" + (e.response?.status ? " (HTTP " + e.response.status + ")" : "") });
   }
 });
 
@@ -245,29 +246,21 @@ app.get("/groups/members", async (req, res) => {
         admin: p.admin === "admin" || p.admin === "superadmin" }));
       const withNumber = rows.filter(x => x.number);
       const lines = rows.map((x, i) => (i + 1) + ". " + (x.number || ("hidden number (" + x.lid + ")")) + (x.admin ? " [admin]" : ""));
-      const body = "Line: " + (LINES.indexOf(instance) + 1) + " (" + instance + ")\nTotal members: " + rows.length +
-        " | with visible number: " + withNumber.length +
-        "\nPulled: " + new Date().toISOString() + "\n\n" + lines.join("\n");
+      const body = "Line: " + (LINES.indexOf(instance) + 1) + " (" + instance + ")\nTotal members: " + rows.length + " | with visible number: " + withNumber.length + "\nPulled: " + new Date().toISOString() + "\n\n" + lines.join("\n");
       try {
-        // Private ClickUp list the service already writes to (same token as the daily run).
         await axios.post(CLICKUP_API + "/list/" + MEMBERS_LIST_ID + "/task",
-          { name: "WA group members: " + (g.subject || g.id) + " (" + new Date().toISOString().slice(0, 10) + ")" + lineTag(instance),
-            description: body },
+          { name: "WA group members: " + (g.subject || g.id) + " (" + new Date().toISOString().slice(0, 10) + ")" + lineTag(instance), description: body },
           { headers: { Authorization: CLICKUP_TOKEN }, timeout: 30000 });
       } catch (e) {
-        throw Object.assign(new Error("ClickUp write failed" + (e.response?.status ? " (HTTP " + e.response.status + ")" : "") +
-          (CLICKUP_TOKEN ? "" : " - CLICKUP_API_TOKEN not set")), { client: false, safe: true });
+        throw Object.assign(new Error("ClickUp write failed" + (e.response?.status ? " (HTTP " + e.response.status + ")" : "") + (CLICKUP_TOKEN ? "" : " - CLICKUP_API_TOKEN not set")), { client: false, safe: true });
       }
-      summary.push({ name: g.subject || g.id, members: rows.length, withVisibleNumber: withNumber.length,
-        hiddenLidOnly: rows.length - withNumber.length });
+      summary.push({ name: g.subject || g.id, members: rows.length, withVisibleNumber: withNumber.length, hiddenLidOnly: rows.length - withNumber.length });
       await new Promise(r => setTimeout(r, 600));
     }
     res.set("Cache-Control", "no-store");
-    res.json({ instance, line: LINES.indexOf(instance) + 1, matchedGroups: summary.length,
-      note: "Numbers saved as tasks in the private ClickUp WhatsApp list; not returned here.", groups: summary });
+    res.json({ instance, line: LINES.indexOf(instance) + 1, matchedGroups: summary.length, note: "Numbers saved as tasks in the private ClickUp WhatsApp list; not returned here.", groups: summary });
   } catch (e) {
-    res.status(e.client ? 400 : e.safe ? 200 : 502).json({ ok: false, error: (e.client || e.safe) ? e.message :
-      "Member export failed" + (e.response?.status ? " (HTTP " + e.response.status + ")" : "") });
+    res.status(e.client ? 400 : e.safe ? 200 : 502).json({ ok: false, error: (e.client || e.safe) ? e.message : "Member export failed" + (e.response?.status ? " (HTTP " + e.response.status + ")" : "") });
   }
 });
 

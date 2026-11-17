@@ -213,6 +213,8 @@ function install(app, { axios, baseUrl, apiKey, instance }) {
         pagination: { offset, limit, nextOffset: offset + limit < list.length ? offset + limit : null }, chats: list.slice(offset, offset + limit) });
     } catch (e) { res.status(502).json({ error: "Chat retrieval failed", coverage: { complete: false } }); }
   });
-  return { request, verifiedCollect };
+  // Server-internal read capabilities for the separately authenticated MCP route.
+  return { request, verifiedCollect, identity, getDailyJob: ensureJob,
+    resolveDailyNumbers: job => numbers().get(job) };
 }
 module.exports = { VERSION, timestamp, jidOf, textOf, dayBounds, category, aggregate, collectPass, verifiedCollect, install };
