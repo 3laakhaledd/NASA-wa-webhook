@@ -3,7 +3,7 @@ const crypto = require("node:crypto");
 // Only phone JIDs or explicitly typed phoneNumber fields are phone evidence.
 function phone(value, explicit = false) {
   if (typeof value !== "string") return null;
-  const match = value.match(/^(\d{8,15})(?::\d+)?@s\.whatsapp\.net$/);
+  const match = value.match(/^([1-9]\d{7,14})(?::\d+)?@s\.whatsapp\.net$/);
   if (match) return "+" + match[1];
   if (explicit && /^\+?[1-9]\d{7,14}$/.test(value)) return "+" + value.replace(/^\+/, "");
   return null;
@@ -21,22 +21,22 @@ function resolve(rows, ownerJid, groups = [], { contacts: contactRecords = [], e
     if (!choices.has(pn)) choices.set(pn, new Set());
     choices.get(pn).add(source);
   }
+  const active = new Set(rows);
   for (const m of [...rows, ...evidenceRows]) {
     const key = m.key || {}, jid = key.remoteJid;
     if (!individual(jid)) continue;
-    if (rows.includes(m)) {
+    if (active.has(m)) {
       if (!threads.has(jid)) threads.set(jid, { jid, name: "" });
       if (!key.fromMe && m.pushName) threads.get(jid).name = m.pushName;
     }
-    // Direct remote-JID alternates describe this individual conversation.
-    for (const v of [key.remoteJidAlt, m.remoteJidAlt, key.previousRemoteJid]) {
+    for (const v of [key.remoteJidAlt, m.remoteJidAlt, key.previousRemoteJid, m.previousRemoteJid]) {
       link(jid, phone(v), "message alternate");
       if (typeof v === "string" && v.endsWith("@lid"))
         link(v, phone(jid), "message alternate");
     }
-    // Sender phone fields describe the contact only on inbound individual messages.
+    // Outbound sender fields belong to the school, not the recipient.
     if (key.fromMe === false) {
-      for (const v of [key.senderPn, key.participantPn])
+      for (const v of [key.senderPn, key.participantPn, m.senderPn, m.participantPn])
         link(jid, phone(v), "inbound sender");
     }
   }
@@ -47,7 +47,6 @@ function resolve(rows, ownerJid, groups = [], { contacts: contactRecords = [], e
   }
   for (const g of groups) {
     for (const p of (Array.isArray(g.participants) ? g.participants : [])) {
-      // A roster row can contain conflicting phone fields: retain the conflict.
       const numbers = new Set([phone(p.phoneNumber, true), phone(p.jid), phone(p.id)].filter(Boolean));
       for (const lid of [p.id, p.lid]) for (const pn of numbers) link(lid, pn, "group roster");
     }
@@ -56,7 +55,7 @@ function resolve(rows, ownerJid, groups = [], { contacts: contactRecords = [], e
   let resolvedThreads = 0, excludedSchoolThreads = 0;
   for (const t of threads.values()) {
     const direct = phone(t.jid);
-    if (direct === owner) { excludedSchoolThreads++; continue; }
+    if (direct === owner && owner) { excludedSchoolThreads++; continue; }
     const choices = direct ? new Map([[direct, new Set(["phone JID"])]]) : mappings.get(t.jid);
     if (!choices || choices.size !== 1) {
       unresolved.push({ name: t.name || null,
@@ -82,8 +81,7 @@ function resolve(rows, ownerJid, groups = [], { contacts: contactRecords = [], e
   };
 }
 
-// Identity evidence can be outside the requested reporting window. It never adds
-// conversations or messages to that window. No read-state or send routes are used.
+// Identity samples never add messages or conversations to the requested day.
 async function mappingEvidence({ rows, axios, baseUrl, apiKey, instance }) {
   const path = p => String(baseUrl).replace(/\/$/, "") + p + "/" + encodeURIComponent(instance);
   const options = { headers: { apikey: apiKey, "Content-Type": "application/json" }, timeout: 30000 };
@@ -97,11 +95,12 @@ async function mappingEvidence({ rows, axios, baseUrl, apiKey, instance }) {
       const r = await axios.post(path("/chat/findContacts"), { where: {}, offset: 500, page }, options);
       if (!Array.isArray(r.data)) throw Error("invalid contacts");
       if (!r.data.length) break;
+      let added = 0;
       for (const c of r.data) {
         const id = JSON.stringify(c);
-        if (seen.has(id)) throw Error("repeated pagination");
-        seen.add(id); contacts.push(c);
+        if (!seen.has(id)) { seen.add(id); contacts.push(c); added++; }
       }
+      if (!added) throw Error("repeated pagination");
     }
   } catch (_) { warnings.push("Saved-contact mapping lookup incomplete."); }
   try {
@@ -117,7 +116,6 @@ async function mappingEvidence({ rows, axios, baseUrl, apiKey, instance }) {
     if (!Array.isArray(r.data)) throw Error("invalid groups");
     groups.push(...r.data);
   } catch (_) { warnings.push("Group-roster mapping unavailable."); }
-  // Bounded recent-message sampling is identity evidence, NOT transcript coverage.
   for (const jid of lids) {
     try {
       const r = await axios.post(path("/chat/findMessages"),
@@ -201,11 +199,11 @@ async function dailyChatReport({ cmd, axios, baseUrl, apiKey, lines }) {
       warnings: evidence.warnings, chats }, null, 2) + "\n```" };
 }
 
-function authorized(req, token) {
-  if (!token) return false;
+function authorized(req, ...tokens) {
   const supplied = String(req.get("authorization") || "");
   const hash = s => crypto.createHash("sha256").update(s).digest();
-  return crypto.timingSafeEqual(hash(supplied), hash("Bearer " + token));
+  return tokens.some(token => typeof token === "string" && token &&
+    crypto.timingSafeEqual(hash(supplied), hash("Bearer " + token)));
 }
 
 function install(app, { ensureJob, axios, baseUrl, apiKey, instance,
@@ -259,4 +257,73 @@ function install(app, { ensureJob, axios, baseUrl, apiKey, instance,
     }
   });
 }
-module.exports = { phone, resolve, mappingEvidence, dailyChatReport, authorized, install };
+
+// Authenticated insights use the same evidence rules as /insights/numbers.
+// The public NASA response remains unchanged. Never accept a URL credential.
+function createInsightsNumbers({ axios, baseUrl, apiKey, instance, identity,
+  readToken, adminToken = "" }) {
+  const cache = new WeakMap();
+  const fail = (message, statusCode = 502) => {
+    throw Object.assign(new Error(message), { statusCode });
+  };
+  function authorize(req) {
+    const header = String(req.get("authorization") || "");
+    const requested = req.query.numbers === "true";
+    if (!header && !requested) return false;
+    if (!readToken && !adminToken) fail("Private number access is not configured", 503);
+    if (!authorized(req, readToken, adminToken)) fail("Authentication required", 403);
+    return true;
+  }
+  async function get(job) {
+    if (job.status !== "complete" || job.coverage?.complete !== true ||
+        job.identity?.name !== instance || !phone(job.identity?.ownerJid))
+      fail("Verified account and message coverage are required for phone resolution");
+    const check = async () => {
+      const current = await identity();
+      if (current.name !== instance || current.ownerJid !== job.identity.ownerJid)
+        fail("Connected school number changed; retry a fresh report");
+    };
+    await check();
+    if (!cache.has(job)) {
+      cache.set(job, (async () => {
+        const evidence = await mappingEvidence({ rows: job.rows, axios, baseUrl, apiKey, instance });
+        const totals = resolve(job.rows, job.identity.ownerJid, evidence.groups, evidence);
+        const byJid = new Map();
+        const threads = new Map();
+        for (const m of job.rows) {
+          if (!individual(m.key?.remoteJid)) continue;
+          if (!threads.has(m.key.remoteJid)) threads.set(m.key.remoteJid, []);
+          threads.get(m.key.remoteJid).push(m);
+        }
+        // Full-day evidence prevents conflicts disappearing on a display page.
+        const options = { contacts: evidence.contacts,
+          evidenceRows: [...job.rows, ...evidence.evidenceRows] };
+        for (const [jid, rows] of threads) {
+          const r = resolve(rows, job.identity.ownerJid, evidence.groups, options);
+          const contact = r.contacts[0];
+          byJid.set(jid, {
+            phoneNumber: contact?.number || null,
+            phoneNumberStatus: contact ? "verified" :
+              r.excludedSchoolThreads ? "school_account" : "unresolved",
+            phoneNumberSources: contact?.numberSources || [],
+            phoneNumberReason: r.unresolved[0]?.reason || null
+          });
+        }
+        const { contacts, unresolved, ...counts } = totals;
+        return { byJid, totals: { ...counts, warnings: evidence.warnings,
+          snapshotAt: job.coverage.verifiedAt,
+          note: "Phone coverage is separate from message coverage. Confirmed aliases share one number; unresolved threads are not unique people." } };
+      })().catch(error => { cache.delete(job); throw error; }));
+    }
+    const result = await cache.get(job);
+    await check();
+    return result;
+  }
+  function fields(result, jid) {
+    if (!result) return {};
+    return result.byJid.get(jid) || { phoneNumber: null,
+      phoneNumberStatus: "not_individual", phoneNumberSources: [], phoneNumberReason: null };
+  }
+  return { authorize, get, fields };
+}
+module.exports = { phone, resolve, mappingEvidence, dailyChatReport, authorized, install, createInsightsNumbers };

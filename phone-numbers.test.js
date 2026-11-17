@@ -139,3 +139,97 @@ test("private daily report uses exact Riyadh bounds, both directions, and exclud
   assert.ok(!out.text.includes("outside sample"));
   assert.ok(!out.text.includes(lid));
 });
+
+// Authenticated insights regression checks (synthetic data only).
+{
+const { createInsightsNumbers } = require("./phone-numbers");
+const req = (token = "", query = {}) => ({ get: () => token ? "Bearer " + token : "", query });
+function setup(overrides = {}) {
+  let lookups = 0;
+  const options = { instance: "synthetic", readToken: "read-test", adminToken: "admin-test", baseUrl: "https://example.invalid", apiKey: "synthetic",
+    identity: async () => ({ name: "synthetic", ownerJid: owner }),
+    axios: { get: async () => ({ data: [] }), post: async url => { lookups++; return { data: url.includes("findMessages") ? { messages: { records: [] } } : [] }; } }, ...overrides };
+  const service = createInsightsNumbers(options);
+  const job = { status: "complete", date: "2026-11-10", coverage: { complete: true, verifiedAt: "snapshot" }, identity: { name: "synthetic", ownerJid: owner },
+    rows: [msg(pn, {}, true), msg(lid, { remoteJidAlt: pn }), msg("222222222222222@lid"), msg("123@g.us"), msg(owner)] };
+  return { service, job, lookups: () => lookups };
+}
+test("insights: only valid header credentials enable numbers", () => {
+  const { service } = setup();
+  assert.equal(service.authorize(req()), false);
+  assert.equal(service.authorize(req("read-test")), true);
+  assert.equal(service.authorize(req("admin-test")), true);
+  assert.throws(() => service.authorize(req("wrong")), e => e.statusCode === 403);
+  assert.throws(() => service.authorize(req("", { numbers: "true", key: "read-test" })), e => e.statusCode === 403);
+  assert.throws(() => setup({ readToken: "", adminToken: "" }).service.authorize(req("", { numbers: "true" })), e => e.statusCode === 503);
+});
+test("insights: numbers match conversations and alias totals are deduplicated", async () => {
+  const { service, job, lookups } = setup(), result = await service.get(job);
+  assert.equal(result.totals.individualThreads, 3); assert.equal(result.totals.resolvedThreads, 2);
+  assert.equal(result.totals.uniquePhoneNumbers, 1); assert.equal(result.totals.unresolvedThreads, 1);
+  assert.equal(result.totals.phoneNumbersComplete, false);
+  assert.equal(service.fields(result, pn).phoneNumber, "+966500000001");
+  assert.equal(service.fields(result, lid).phoneNumber, "+966500000001");
+  assert.equal(service.fields(result, "222222222222222@lid").phoneNumber, null);
+  assert.equal(service.fields(result, "123@g.us").phoneNumberStatus, "not_individual");
+  assert.equal(service.fields(result, owner).phoneNumberStatus, "school_account");
+  assert.deepEqual(service.fields(null, pn), {});
+  const count = lookups(); await service.get(job); assert.equal(lookups(), count);
+});
+test("insights: zero activity and incomplete retrieval stay distinct", async () => {
+  const { service, job } = setup(), empty = await service.get({ ...job, rows: [] });
+  assert.equal(empty.totals.uniquePhoneNumbers, 0); assert.equal(empty.totals.phoneNumbersComplete, true);
+  await assert.rejects(() => service.get({ ...job, coverage: { complete: false } }));
+  await assert.rejects(() => service.get({ ...job, status: "running" }));
+});
+test("insights: changed account identity invalidates cached mappings", async () => {
+  let account = owner;
+  const { service, job } = setup({ identity: async () => ({ name: "synthetic", ownerJid: account }) });
+  await service.get(job); account = pn;
+  await assert.rejects(() => service.get(job), /school number changed/);
+  await assert.rejects(() => service.get({ ...job, identity: {} }));
+});
+test("insights: full-window conflicts stay unresolved on smaller pages", async () => {
+  const { service, job } = setup();
+  job.rows = [msg(lid, { remoteJidAlt: pn }), msg(lid, { remoteJidAlt: "966500000002@s.whatsapp.net" })];
+  const result = await service.get(job);
+  assert.equal(result.totals.unresolvedThreads, 1); assert.equal(service.fields(result, lid).phoneNumber, null);
+  assert.equal(service.fields(result, lid).phoneNumberReason, "conflicting phone mappings");
+});
+test("insights: line-local caches never share mappings", async () => {
+  const a = setup(), b = setup(); b.job.rows = [msg("966500000002@s.whatsapp.net")];
+  const ar = await a.service.get(a.job), br = await b.service.get(b.job);
+  assert.equal(a.service.fields(ar, pn).phoneNumber, "+966500000001"); assert.equal(b.service.fields(br, pn).phoneNumber, null);
+});
+test("insights: identity changes during enrichment fail closed", async () => {
+  let checks = 0;
+  const { service, job } = setup({ identity: async () => ({ name: "synthetic", ownerJid: ++checks === 1 ? owner : pn }) });
+  await assert.rejects(() => service.get(job), /school number changed/);
+});
+test("insights: chat and record pages enrich only protected responses without changing counts", async () => {
+  const fs = require("node:fs"), vm = require("node:vm"), mod = { exports: {} }, date = "2026-11-10";
+  const rows = [msg(lid, { remoteJidAlt: pn }), msg(pn, {}, true)].map((m, i) => ({ ...m, id: "synthetic-" + i, messageTimestamp: 1794261600 + i, message: { conversation: "synthetic message" }, messageType: "conversation" }));
+  const seededJobs = new Map();
+  const source = fs.readFileSync(__dirname + "/retrieval.js", "utf8").replace("const jobs = new Map()", "const jobs = seededJobs");
+  vm.runInNewContext(source, { module: mod, process: { env: { WA_REPORT_READ_TOKEN: "read-test", HIS_READ_KEY: "read-test", CONNECT_KEY: "admin-test" } }, seededJobs,
+    require: name => name === "./windowed" ? () => {} : name === "./phone-numbers" ? { ...require("./phone-numbers"), install() {} } : require(name) });
+  seededJobs.set(date, { date, status: "complete", created: Date.now(), coverage: { complete: true, verifiedAt: "snapshot" }, identity: { name: "synthetic", ownerJid: owner }, rows, ...mod.exports.aggregate(rows) });
+  const routes = new Map();
+  mod.exports.install({ get: (path, fn) => routes.set(path, fn) }, { instance: "synthetic", baseUrl: "https://example.invalid", apiKey: "synthetic",
+    axios: { get: async url => ({ data: url.includes("fetchInstances") ? [{ name: "synthetic", ownerJid: owner }] : [] }), post: async url => ({ data: url.includes("findMessages") ? { messages: { records: [] } } : [] }) } });
+  const response = () => ({ code: 200, headers: {}, set(k, v) { this.headers[k] = v; return this; }, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } });
+  for (const path of ["/insights", "/insights/records"]) {
+    for (const offset of [0, 1]) {
+      const res = response(); await routes.get(path)(req("read-test", { date, limit: "1", offset: String(offset), transcript: "true" }), res);
+      assert.equal(res.code, 200); assert.equal(res.body.summary.totalMessages, 2);
+      assert.equal(res.body.phoneResolution.uniquePhoneNumbers, 1); assert.equal(res.body.phoneResolution.resolvedThreads, 2);
+      const entries = res.body.chats || res.body.messages; assert.equal(entries.length, 1); assert.equal(entries[0].phoneNumber, "+966500000001");
+      assert.equal(res.body.pagination.nextOffset, offset === 0 ? 1 : null); assert.equal(res.headers.Vary, "Authorization"); assert.equal(res.headers["Cache-Control"], "no-store");
+    }
+    const publicRes = response(); await routes.get(path)(req("", { date }), publicRes);
+    assert.equal(publicRes.body.phoneResolution, undefined); assert.equal((publicRes.body.chats || publicRes.body.messages)[0].phoneNumber, undefined);
+    const denied = response(); await routes.get(path)(req("wrong", { date }), denied);
+    assert.equal(denied.code, 403); assert.equal(denied.body.chats, undefined); assert.equal(denied.body.messages, undefined);
+  }
+});
+}
