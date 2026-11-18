@@ -82,6 +82,11 @@ function install(app, { lines, getApi, cxOptions = {}, apiKey = process.env.NASA
       return result({ ...base, pagination: { offset, limit, total: rows.length, returned: page.length, nextOffset: offset + page.length < rows.length ? offset + page.length : null }, [names.report === name ? "chats" : "messages"]: page, note: "Individual activity only in the paginated data; summary includes all account chat types. No WhatsApp sends, read-state changes or ClickUp writes." });
     } catch (_) { return failure("Protected reporting lookup failed; verify selected account, coverage and service configuration. No complete report was produced."); }
   }
+  // A separate private List grants read requests only, with credentials kept in this service.
+  // It never delegates to the legacy command processor or any WhatsApp sending function.
+  if (process.env.CLICKUP_API_TOKEN && cxOptions.axios) {
+    require("./request-queue").install({ axios: cxOptions.axios, call });
+  }
   app.all("/mcp", async (req, res) => {
     res.set("Cache-Control", "no-store"); res.set("Vary", "Authorization, X-API-Key, Origin");
     if (!configured) return res.status(503).json({ error: "Configure a strong NASA_WA_MCP_API_KEY privately in Railway" });
